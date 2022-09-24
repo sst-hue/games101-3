@@ -256,31 +256,93 @@ static Eigen::Vector2f interpolate(float alpha, float beta, float gamma, const E
     return Eigen::Vector2f(u, v);
 }
 
+template <typename T>
+T GetMin(T& left, T& right)
+{
+    return left < right ? left : right;
+}
+template <typename T, typename... args>
+T GetMin(T& left, T& right, args&... argv)
+{
+    return GetMin(left < right ? left : right, argv...);
+}
+
+template <typename T>
+T GetMax(T& left, T& right)
+{
+    return left > right ? left : right;
+}
+template <typename T, typename... args>
+T GetMax(T& left, T& right, args&... argv)
+{
+    return GetMax(left > right ? left : right, argv...);
+}
+
 //Screen space rasterization
 void rst::rasterizer::rasterize_triangle(const Triangle& t, const std::array<Eigen::Vector3f, 3>& view_pos) 
 {
-    // TODO: From your HW3, get the triangle rasterization code.
-    // TODO: Inside your rasterization loop:
-    //    * v[i].w() is the vertex view space depth value z.
-    //    * Z is interpolated view space depth for the current pixel
-    //    * zp is depth between zNear and zFar, used for z-buffer
+    auto v = t.toVector4();
+    Vector4f v3[3] = {
+        Vector4f(v[0].x(), v[0].y(), v[0].z(), 1),
+        Vector4f(v[1].x(), v[1].y(), v[1].z(), 1),
+        Vector4f(v[2].x(), v[2].y(), v[2].z(), 1)
+    };
+    // 获取三角形包围盒
+    float minX = GetMin(v[0].x(), v[1].x(), v[2].x()) - 1;
+    float maxX = GetMax(v[0].x(), v[1].x(), v[2].x()) + 1;
+    float minY = GetMin(v[0].y(), v[1].y(), v[2].y()) - 1;
+    float maxY = GetMax(v[0].y(), v[1].y(), v[2].y()) + 1;
 
-    // float Z = 1.0 / (alpha / v[0].w() + beta / v[1].w() + gamma / v[2].w());
-    // float zp = alpha * v[0].z() / v[0].w() + beta * v[1].z() / v[1].w() + gamma * v[2].z() / v[2].w();
-    // zp *= Z;
+    // 2*2 MSAA采样
+    float fill = 0;
+    int samplingSelectX = 2, samplingSelectY = 2, fillCount = 0;
+    float stepX = 1.f / samplingSelectX, stepY = 1.f / samplingSelectY;
 
-    // TODO: Interpolate the attributes:
-    // auto interpolated_color
-    // auto interpolated_normal
-    // auto interpolated_texcoords
-    // auto interpolated_shadingcoords
+    // 遍历包围盒像素
+    for (int y = minY; y <= maxY; y++)
+    {
+        for (int x = minX; x <= maxX; x++)
+        {
+            // 2*2 MSAA采样
+            fill = 0;
+            fillCount = 0;
+            for (float samplingX = x + stepX / 2.f; samplingX < x + 1.f; samplingX += stepX)
+            {
+                for (float samplingY = y + stepY / 2.f; samplingY < y + 1.f; samplingY += stepY)
+                {
+                    if (insideTriangle(samplingX, samplingY, v3))
+                    {
+                        fillCount++;
+                    }
+                }
+            }
+            fill = 1.f * fillCount / (samplingSelectX * samplingSelectY);
+            if (!fillCount)
+            {
+                continue;
+            }
+            // 获取深度
+            auto [alpha, beta, gamma] = computeBarycentric2D(x, y, t.v);
+            float w_reciprocal = 1.0 / (alpha / v[0].w() + beta / v[1].w() + gamma / v[2].w());
+            float z_interpolated = alpha * v[0].z() / v[0].w() + beta * v[1].z() / v[1].w() + gamma * v[2].z() / v[2].w();
+            z_interpolated *= w_reciprocal;
+            // 深度更低，则显示
+            if (z_interpolated < depth_buf[get_index(x, y)])
+            {
+                depth_buf[get_index(x, y)] = z_interpolated;
+                auto interpolated_color = interpolate(alpha, beta, gamma, t.color[0], t.color[1], t.color[2], 1);
+                auto interpolated_normal = interpolate(alpha, beta, gamma, t.normal[0], t.normal[1], t.normal[2], 1).normalized();
+                auto interpolated_texcoords = interpolate(alpha, beta, gamma, t.tex_coords[0], t.tex_coords[1], t.tex_coords[2], 1);
+                auto interpolated_shadingcoords = interpolate(alpha, beta, gamma, view_pos[0], view_pos[1], view_pos[2], 1);
 
-    // Use: fragment_shader_payload payload( interpolated_color, interpolated_normal.normalized(), interpolated_texcoords, texture ? &*texture : nullptr);
-    // Use: payload.view_pos = interpolated_shadingcoords;
-    // Use: Instead of passing the triangle's color directly to the frame buffer, pass the color to the shaders first to get the final color;
-    // Use: auto pixel_color = fragment_shader(payload);
-
- 
+                fragment_shader_payload payload(interpolated_color, interpolated_normal.normalized(), interpolated_texcoords, texture ? &*texture : nullptr);
+                payload.view_pos = interpolated_shadingcoords;
+                // Instead of passing the triangle's color directly to the frame buffer, pass the color to the shaders first to get the final color;
+                auto pixel_color = fragment_shader(payload);
+                set_pixel(Eigen::Vector2i(x, y), fill * pixel_color);
+            }
+        }
+    }
 }
 
 void rst::rasterizer::set_model(const Eigen::Matrix4f& m)
@@ -339,4 +401,3 @@ void rst::rasterizer::set_fragment_shader(std::function<Eigen::Vector3f(fragment
 {
     fragment_shader = frag_shader;
 }
-

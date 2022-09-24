@@ -49,10 +49,10 @@ Eigen::Matrix4f get_model_matrix(float angle)
 
 Eigen::Matrix4f get_projection_matrix(float eye_fov, float aspect_ratio, float zNear, float zFar)
 {
-    // TODO: Copy-paste your implementation from the previous assignment.
+// TODO: Copy-paste your implementation from the previous assignment.
     Eigen::Matrix4f projection = Eigen::Matrix4f::Identity();
 
-    float height = tan((eye_fov / 360) * MY_PI) * abs(zNear);
+    float height = -tan((eye_fov / 360) * MY_PI) * abs(zNear);
     float weight = height / aspect_ratio;
 
     // TODO: Implement this function
@@ -61,19 +61,26 @@ Eigen::Matrix4f get_projection_matrix(float eye_fov, float aspect_ratio, float z
 
     // 透视矩阵
     Eigen::Matrix4f translate1;
-    translate1 << zNear, 0, 0, 0,
-        0, zNear, 0, 0,
-        0, 0, (zNear + zFar), -1.0 * zNear * zFar,
-        0, 0, 1, 0;
+    translate1 <<   zNear,  0,      0,                  0,
+                    0,      zNear,  0,                  0,
+                    0,      0,      (zNear + zFar),     -1.0 * zNear * zFar,
+                    0,      0,      1,                  0;
 
-    // 正交矩阵
+    // 平移矩阵
     Eigen::Matrix4f translate2;
-    translate2 << 1.f / weight, 0, 0, 0,
-        0, 1.f / height, 0, 0,
-        0, 0, 2.f / (zNear - zFar), -(zNear - zFar) / 2.f,
-        0, 0, 0, 1;
+    translate2 <<   1,  0,  0,  0,
+                    0,  1,  0,  0,
+                    0,  0,  1,  -(zNear + zFar) / 2.f,
+                    0,  0,  0,  1.f;
 
-    projection = translate2 * translate1 * projection;
+    // 缩放矩阵
+    Eigen::Matrix4f translate3;
+    translate3 <<   1.f / weight,   0,              0,                      0,
+                    0,              1.f / height,   0,                      0,
+                    0,              0,              2.f / (zNear - zFar),   0,
+                    0,              0,              0,                      1.f;
+
+    projection = (translate3 * translate2) * translate1 * projection;
 
     return projection;
 }
@@ -109,7 +116,9 @@ Eigen::Vector3f texture_fragment_shader(const fragment_shader_payload& payload)
     if (payload.texture)
     {
         // TODO: Get the texture value at the texture coordinates of the current fragment
-
+        float u = payload.tex_coords.x() < 0 ? 0 : payload.tex_coords.x();
+        float v = payload.tex_coords.y() < 0 ? 0 : payload.tex_coords.y();
+        return_color = payload.texture->getColor(u, v);
     }
     Eigen::Vector3f texture_color;
     texture_color << return_color.x(), return_color.y(), return_color.z();
@@ -137,9 +146,16 @@ Eigen::Vector3f texture_fragment_shader(const fragment_shader_payload& payload)
     {
         // TODO: For each light source in the code, calculate what the *ambient*, *diffuse*, and *specular* 
         // components are. Then, accumulate that result on the *result_color* object.
-
+        Eigen::Vector3f l = (light.position - point).normalized();  // 光向量
+        Eigen::Vector3f v = (eye_pos - point).normalized();         // 视口向量
+        Eigen::Vector3f h = (l + v).normalized();                   // 半程向量
+        double r_2 = (light.position - point).dot(light.position - point);  // r的二次方
+        Eigen::Vector3f Ld = kd.cwiseProduct(light.intensity / r_2) * std::max(0.0f, normal.dot(l));                // 漫反射
+        Eigen::Vector3f Ls = ks.cwiseProduct(light.intensity / r_2) * std::pow(std::max(0.0f, normal.dot(h)), p);   // 高光
+        result_color += Ld + Ls;
     }
-
+    Eigen::Vector3f La = ka.cwiseProduct(amb_light_intensity);      // 环境光
+    result_color += La;
     return result_color * 255.f;
 }
 
@@ -167,9 +183,16 @@ Eigen::Vector3f phong_fragment_shader(const fragment_shader_payload& payload)
     {
         // TODO: For each light source in the code, calculate what the *ambient*, *diffuse*, and *specular* 
         // components are. Then, accumulate that result on the *result_color* object.
-        
+        Eigen::Vector3f l = (light.position - point).normalized();  // 光向量
+        Eigen::Vector3f v = (eye_pos - point).normalized();         // 视口向量
+        Eigen::Vector3f h = (l + v).normalized();                   // 半程向量
+        double r_2 = (light.position - point).dot(light.position - point);  // r的二次方
+        Eigen::Vector3f Ld = kd.cwiseProduct(light.intensity / r_2) * std::max(0.0f, normal.dot(l));                // 漫反射
+        Eigen::Vector3f Ls = ks.cwiseProduct(light.intensity / r_2) * std::pow(std::max(0.0f, normal.dot(h)), p);   // 高光
+        result_color += Ld + Ls;
     }
-
+    Eigen::Vector3f La = ka.cwiseProduct(amb_light_intensity);      // 环境光
+    result_color += La;
     return result_color * 255.f;
 }
 
@@ -207,17 +230,42 @@ Eigen::Vector3f displacement_fragment_shader(const fragment_shader_payload& payl
     // Vector ln = (-dU, -dV, 1)
     // Position p = p + kn * n * h(u,v)
     // Normal n = normalize(TBN * ln)
+    // 这个地方是为了后面用局部坐标系，让n始终朝向001，课上讲过
+    float x = normal.x();
+    float y = normal.y();
+    float z = normal.z();
+    Eigen::Vector3f t{ x * y / std::sqrt(x * x + z * z), std::sqrt(x * x + z * z), z * y / std::sqrt(x * x + z * z) };
+    Eigen::Vector3f b = normal.cross(t);
+    Eigen::Matrix3f TBN;
+    TBN << t.x(), b.x(), normal.x(),
+        t.y(), b.y(), normal.y(),
+        t.z(), b.z(), normal.z();
+    float u = payload.tex_coords.x() < 0 ? 0 : payload.tex_coords.x();
+    float v = payload.tex_coords.y() < 0 ? 0 : payload.tex_coords.y();
+    float w = payload.texture->width;
+    float h = payload.texture->height;
+    float dU = kh * kn * (payload.texture->getColor(u + 1 / w, v).norm() - payload.texture->getColor(u, v).norm());
+    float dV = kh * kn * (payload.texture->getColor(u, v + 1 / h).norm() - payload.texture->getColor(u, v).norm());
+    Eigen::Vector3f ln{ -dU, -dV, 1 };
+    //与凹凸贴图的区别就在于这句话
+    point += (kn * normal * payload.texture->getColor(u, v).norm());
+    normal = (TBN * ln).normalized();
 
-
-    Eigen::Vector3f result_color = {0, 0, 0};
-
+    Eigen::Vector3f result_color = { 0, 0, 0 };
     for (auto& light : lights)
     {
         // TODO: For each light source in the code, calculate what the *ambient*, *diffuse*, and *specular* 
         // components are. Then, accumulate that result on the *result_color* object.
-
-
+        Eigen::Vector3f l = (light.position - point).normalized();  // 光向量
+        Eigen::Vector3f v = (eye_pos - point).normalized();         // 视口向量
+        Eigen::Vector3f h = (l + v).normalized();                   // 半程向量
+        double r_2 = (light.position - point).dot(light.position - point);  // r的二次方
+        Eigen::Vector3f Ld = kd.cwiseProduct(light.intensity / r_2) * std::max(0.0f, normal.dot(l));                // 漫反射
+        Eigen::Vector3f Ls = ks.cwiseProduct(light.intensity / r_2) * std::pow(std::max(0.0f, normal.dot(h)), p);   // 高光
+        result_color += Ld + Ls;
     }
+    Eigen::Vector3f La = ka.cwiseProduct(amb_light_intensity);      // 环境光
+    result_color += La;
 
     return result_color * 255.f;
 }
@@ -256,10 +304,24 @@ Eigen::Vector3f bump_fragment_shader(const fragment_shader_payload& payload)
     // Vector ln = (-dU, -dV, 1)
     // Normal n = normalize(TBN * ln)
 
-
-    Eigen::Vector3f result_color = {0, 0, 0};
-    result_color = normal;
-
+    // 这个地方是为了后面用局部坐标系，让n始终朝向001，课上讲过
+    float x = normal.x();
+    float y = normal.y();
+    float z = normal.z();
+    Eigen::Vector3f t{ x * y / std::sqrt(x * x + z * z), std::sqrt(x * x + z * z), z * y / std::sqrt(x * x + z * z) };
+    Eigen::Vector3f b = normal.cross(t);
+    Eigen::Matrix3f TBN;
+    TBN <<  t.x(), b.x(), normal.x(),
+            t.y(), b.y(), normal.y(),
+            t.z(), b.z(), normal.z();
+    float u = payload.tex_coords.x() < 0 ? 0 : payload.tex_coords.x();
+    float v = payload.tex_coords.y() < 0 ? 0 : payload.tex_coords.y();
+    float w = payload.texture->width;
+    float h = payload.texture->height;
+    float dU = kh * kn * (payload.texture->getColor(u + 1 / w, v).norm() - payload.texture->getColor(u, v).norm());
+    float dV = kh * kn * (payload.texture->getColor(u, v + 1 / h).norm() - payload.texture->getColor(u, v).norm());
+    Eigen::Vector3f ln{ -dU, -dV, 1 };
+    Eigen::Vector3f result_color = (TBN * ln).normalized();
     return result_color * 255.f;
 }
 
